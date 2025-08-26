@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
+	"time"
 )
 
 // Webhook represents a Discord webhook message.
@@ -22,10 +24,15 @@ type Webhook struct {
 type DiscordError struct {
 	StatusCode int
 	Body       string
+	RetryAfter time.Duration // only set if 429 Too Many Requests
 }
 
 // Error returns a human-readable error string for DiscordError.
 func (e *DiscordError) Error() string {
+	if e.StatusCode == http.StatusTooManyRequests && e.RetryAfter > 0 {
+		return fmt.Sprintf("discord webhook error: status=%d retry_after=%s body=%s",
+			e.StatusCode, e.RetryAfter, e.Body)
+	}
 	return fmt.Sprintf("discord webhook error: status=%d body=%s", e.StatusCode, e.Body)
 }
 
@@ -92,7 +99,22 @@ func (w *Webhook) Send(webhookURL string) error {
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return &DiscordError{StatusCode: resp.StatusCode, Body: string(body)}
+
+		discErr := &DiscordError{
+			StatusCode: resp.StatusCode,
+			Body:       string(body),
+		}
+
+		// Handle 429 retry-after
+		if resp.StatusCode == http.StatusTooManyRequests {
+			if ra := resp.Header.Get("Retry-After"); ra != "" {
+				if ms, err := strconv.Atoi(ra); err == nil {
+					discErr.RetryAfter = time.Duration(ms) * time.Millisecond
+				}
+			}
+		}
+
+		return discErr
 	}
 
 	return nil
